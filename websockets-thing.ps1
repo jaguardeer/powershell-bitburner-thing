@@ -1,10 +1,13 @@
+using namespace System.Net.Sockets
+using namespace System.Text
+
 function Parse-Headers
 {
 	Param(
         $msgBytes
 	)
 
-	$msgString = [System.Text.Encoding]::UTF8.GetString($msgBytes);
+	$msgString = [Encoding]::UTF8.GetString($msgBytes);
 
 	$headerLines = $msgString -split "`r`n";
 
@@ -30,7 +33,7 @@ function Generate-SecWebSocketAccept
         $SecWebSocketKey
     )
     $SecWebSocketSuffix = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-    $Bytes = [System.Text.Encoding]::UTF8.GetBytes($SecWebSocketKey + $SecWebSocketSuffix)
+    $Bytes = [Encoding]::UTF8.GetBytes($SecWebSocketKey + $SecWebSocketSuffix)
     $Sha1 = [System.Security.Cryptography.SHA1CryptoServiceProvider]::new()
     $SecWebSocketAccept = [System.Convert]::ToBase64String($Sha1.ComputeHash($Bytes))
     $SecWebSocketAccept
@@ -38,8 +41,9 @@ function Generate-SecWebSocketAccept
 
 function Generate-JsonRpcMessage
 {
+    # https://github.com/bitburner-official/bitburner-src/blob/dev/src/Documentation/doc/programming/remote_api.md
     $msgString = "{`"jsonrpc`":`"2.0`",`"id`":0,`"method`":`"getFileNames`",`"params`":{`"server`":`"home`"}}"
-    $msgBytes = [System.Text.Encoding]::UTF8.GetBytes($msgString)
+    $msgBytes = [Encoding]::UTF8.GetBytes($msgString)
 
     $header = [byte[]]::new(2)
     $header[0] = 0x81
@@ -58,6 +62,16 @@ function Send-JsonRpcMessage
     Write-Host "Sent $bytesSent bytes for JSON-RPC"
 }
 
+function Create-ListenerSocket
+{
+	Param(
+        [IPEndPoint] $LocalEp = [IPEndPoint]::new([IPAddress] "127.0.0.1", 80)
+    )
+    $sock = [Socket]::new([SocketType]::Stream, [ProtocolType]::Tcp)
+    $sock.Bind($LocalEp)
+    $sock
+}
+
 function TestFunc
 {
     Param(
@@ -72,7 +86,7 @@ function TestFunc
     $SecWebSocketAccept = Generate-SecWebSocketAccept $headers."Sec-WebSocket-Key"
     $responseLines = "HTTP/1.1 101 Switching Protocols", "Upgrade: websocket",
         "Connection: Upgrade", "Sec-WebSocket-Accept: $SecWebSocketAccept", "", ""
-    $responseBytes = [System.Text.Encoding]::UTF8.GetBytes($responseLines -join "`r`n")
+    $responseBytes = [Encoding]::UTF8.GetBytes($responseLines -join "`r`n")
     $bytesSent = $clientSocket.Send($responseBytes)
     Write-Host "Sent $bytesSent bytes for WebSocket upgrade"
 
@@ -84,7 +98,7 @@ function TestFunc
     while ( $true )
     {
         # Get data
-        while ( -not $clientSocket.Poll(1e6, [System.Net.Sockets.SelectMode]::SelectRead) )
+        while ( -not $clientSocket.Poll(1e6, [SelectMode]::SelectRead) )
         { <# waiting for data #> }
         $receiveBuffer = [byte[]]::new($clientSocket.Available)
         # Write-Host "There are $bytesAvailable bytes available."
@@ -115,7 +129,7 @@ function TestFunc
             # todo 4 at a time?
             $receiveBuffer[$i] -bxor $maskedKey[$i % 4]
         }
-        $msg += [System.Text.Encoding]::UTF8.GetString($unmaskedBuffer)
+        $msg += [Encoding]::UTF8.GetString($unmaskedBuffer)
         $msg
     }
 }
