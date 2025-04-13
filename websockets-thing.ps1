@@ -64,22 +64,102 @@ function Send-JsonRpcMessage
 
 function Create-ListenerSocket
 {
-	Param(
+    Param(
         [IPEndPoint] $LocalEp = [IPEndPoint]::new([IPAddress] "127.0.0.1", 80)
     )
     $sock = [Socket]::new([SocketType]::Stream, [ProtocolType]::Tcp)
     $sock.Bind($LocalEp)
+    $sock.Listen()
     $sock
+}
+
+function Poll-Socket
+{
+    Param(
+        [Parameter(Mandatory)]
+        [Socket] $Socket
+    )
+    while ( -not $Socket.Poll(1e4, [SelectMode]::SelectRead) )
+    {
+        Start-Sleep -Milliseconds 1
+    }
+}
+
+function Read-Socket
+{
+    Param(
+        [Parameter(Mandatory)]
+        [Socket] $Socket
+    )
+    Poll-Socket -Socket $Socket
+    $ReceiveBuffer = [byte[]]::new($clientSocket.Available)
+    $BytesReceived = $clientSocket.Receive($ReceiveBuffer)
+    $ReceiveBuffer
+}
+
+function Upgrade-WebSocket
+{
+    Param(
+        [Parameter(Mandatory)]
+        [Socket] $Socket
+    )
+    $headers = Parse-Headers (Read-Socket -Socket $Socket)
+    # Accept WebSockets Connection
+    $SecWebSocketAccept = Generate-SecWebSocketAccept $headers."Sec-WebSocket-Key"
+    $responseLines = "HTTP/1.1 101 Switching Protocols", "Upgrade: websocket",
+        "Connection: Upgrade", "Sec-WebSocket-Accept: $SecWebSocketAccept", "", ""
+    $responseBytes = [Encoding]::UTF8.GetBytes($responseLines -join "`r`n")
+    $bytesSent = $clientSocket.Send($responseBytes)
+    Write-Host "Sent $bytesSent bytes for WebSocket upgrade"
+}
+
+function Get-ClientSocket
+{
+    Param(
+        [Parameter(Mandatory)]
+        [Socket] $Socket
+    )
+    $Task = $Socket.AcceptAsync()
+    while ( $Task.Status -eq [System.Threading.Tasks.TaskStatus]::WaitingForActivation )
+    {
+        Start-Sleep -Milliseconds 1
+    }
+    $Task.GetAwaiter().GetResult()
+}
+
+function Send-WebSocketMessage
+{
+    Param(
+        [Parameter(Mandatory)]
+        [Socket] $Socket,
+        [Parameter(Mandatory)]
+        [string] $Message
+    )
+    $msg = [System.Text.Encoding]::UTF8.GetBytes($Message)
+
+    $headerFlags = [byte[]] 0x81
+    $headerPayloadLength = switch($msg.Length)
+    {
+        {$_ -lt 126}  { [byte[]] $msg.Length; break } # 0–125 = This is the payload length.
+        {$_ -lt (1 -shl 16)} { 126; Write-Host "TODO!!!"; exit; break } # 126 = The following 16 bits are the payload length.
+        {$_ -lt (1 -shl 64)} { 127; Write-Host "TODO!!!"; exit; break } # 127 = The following 64 bits (MSB must be 0) are the payload length.
+        default { Write-Host "TODO!! Message needs fragmentation"; exit }
+    }
+    $buffer = $headerFlags + $headerPayloadLength + $msg
+    $sentBytes = $Socket.Send($buffer)
+
+    Write-Host "Sent $sentBytes bytes"
 }
 
 function TestFunc
 {
     Param(
-        [Parameter(Mandatory)] $listenSocket
+        [Parameter(Mandatory)] $ListenSocket
     )
-    $clientSocket = $listenSocket.Accept()
-    $buffer = [byte[]]::new(1024)
-    $bytesReceived = $clientSocket.Receive($buffer)
+    Poll-Socket -Socket $ListenSocket
+    $ClientSocket = $ListenSocket.Accept()
+    $buffer = Read-Socket -Socket $ClientSocket
+    #$bytesReceived = $clientSocket.Receive($buffer)
     $headers = Parse-Headers $buffer
 
     # Accept WebSockets Connection
@@ -98,15 +178,11 @@ function TestFunc
     while ( $true )
     {
         # Get data
-        while ( -not $clientSocket.Poll(1e6, [SelectMode]::SelectRead) )
-        { <# waiting for data #> }
-        $receiveBuffer = [byte[]]::new($clientSocket.Available)
-        # Write-Host "There are $bytesAvailable bytes available."
-        $bytesReceived = $clientSocket.Receive($receiveBuffer)
+        $ReceiveBuffer = Read-Socket -Socket $ClientSocket
         Write-Host "Received $bytesReceived bytes"
 
         # parse received websocket msg
-        $flags, $maskedLength = $receiveBuffer[0..1]
+        $flags, $maskedLength = $ReceiveBuffer[0..1]
         if ( $flags -ne 0x81 )
         {
             Write-Host "Unknown flags: $("0x{0:X}" -f $flags)"
@@ -121,13 +197,13 @@ function TestFunc
             127 { 10; break }
             default { 2; break }
         }
-        $maskedKey = $receiveBuffer[$maskOffset..($maskOffset + 3)]
+        $maskedKey = $ReceiveBuffer[$maskOffset..($maskOffset + 3)]
         Write-Host "maskOffset is $maskOffset"
         Write-Host "maskedKey is 0x$(($maskedKey | % { "{0:x2}" -f $_ }) -join '')"
-        $unmaskedBuffer = for ( $i = $maskOffset + 4 ; $i -lt $receiveBuffer.Count ; $i++ )
+        $unmaskedBuffer = for ( $i = $maskOffset + 4 ; $i -lt $ReceiveBuffer.Count ; $i++ )
         {
             # todo 4 at a time?
-            $receiveBuffer[$i] -bxor $maskedKey[$i % 4]
+            $ReceiveBuffer[$i] -bxor $maskedKey[$i % 4]
         }
         $msg += [Encoding]::UTF8.GetString($unmaskedBuffer)
         $msg
